@@ -1,3 +1,49 @@
+// Map Display Component
+const MapDisplay = ({ coordinates, mapRef, markerRef }) => {
+    const mapContainerRef = React.useRef(null);
+    
+    React.useEffect(() => {
+        if (!coordinates || !mapContainerRef.current) return;
+        
+        // Initialize map if it doesn't exist
+        if (!mapRef.current) {
+            mapRef.current = L.map(mapContainerRef.current).setView([coordinates.latitude, coordinates.longitude], 13);
+            
+            // Add CartoDB Voyager tiles (light basemap with bluish tones)
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+                attribution: '© OpenStreetMap contributors © CARTO',
+                subdomains: 'abcd',
+                maxZoom: 19
+            }).addTo(mapRef.current);
+        }
+        
+        // Update map view and marker
+        if (mapRef.current) {
+            mapRef.current.setView([coordinates.latitude, coordinates.longitude], 13);
+            
+            // Remove existing marker if it exists
+            if (markerRef.current) {
+                mapRef.current.removeLayer(markerRef.current);
+            }
+            
+            // Add new marker
+            markerRef.current = L.marker([coordinates.latitude, coordinates.longitude])
+                .addTo(mapRef.current);
+        }
+        
+        // Cleanup function
+        return () => {
+            // Don't remove map on cleanup, just remove marker
+            if (markerRef.current && mapRef.current) {
+                mapRef.current.removeLayer(markerRef.current);
+                markerRef.current = null;
+            }
+        };
+    }, [coordinates, mapRef, markerRef]);
+    
+    return <div ref={mapContainerRef} className="map-container"></div>;
+};
+
 // Current Weather Component
 const CurrentWeather = () => {
     const [location, setLocation] = React.useState({ city: null, district: null });
@@ -9,6 +55,21 @@ const CurrentWeather = () => {
     const [coordinates, setCoordinates] = React.useState({ hongKong: null, district: null });
     const [selectedLocation, setSelectedLocation] = React.useState('city'); // 'city' or 'district'
     const [weatherCache, setWeatherCache] = React.useState({ city: null, district: null }); // Cache for weather data
+    const [weatherCodeMap, setWeatherCodeMap] = React.useState(null); // Weather code mapping from JSON
+    const mapRef = React.useRef(null);
+    const markerRef = React.useRef(null);
+    
+    // Load weather code mapping from JSON file
+    React.useEffect(() => {
+        fetch('weather_code.json')
+            .then(response => response.json())
+            .then(data => {
+                setWeatherCodeMap(data);
+            })
+            .catch(error => {
+                console.error('Error loading weather_code.json:', error);
+            });
+    }, []);
     
     const currentTime = new Date().toLocaleTimeString('en-US', { 
         hour: '2-digit', 
@@ -16,41 +77,21 @@ const CurrentWeather = () => {
         hour12: false 
     });
     
-    // Weather code to condition text mapping (WMO Weather interpretation codes)
-    // ⚠️ UNCERTAIN: Open-Meteo provides weather_code but NOT text descriptions - this mapping is custom/estimated
-    // The exact text strings like "Mostly Clear" vs "Mainly Clear" are not provided by the API
+    // Weather code to condition text mapping from weather_code.json
     const getWeatherConditionText = (code, isDay = true) => {
-        const conditions = {
-            0: isDay ? 'Clear' : 'Clear',
-            1: isDay ? 'Mainly Clear' : 'Mostly Clear',
-            2: 'Partly Cloudy',
-            3: 'Overcast',
-            45: 'Foggy',
-            48: 'Foggy',
-            51: 'Light Drizzle',
-            53: 'Moderate Drizzle',
-            55: 'Dense Drizzle',
-            56: 'Light Freezing Drizzle',
-            57: 'Dense Freezing Drizzle',
-            61: 'Slight Rain',
-            63: 'Moderate Rain',
-            65: 'Heavy Rain',
-            66: 'Light Freezing Rain',
-            67: 'Heavy Freezing Rain',
-            71: 'Slight Snow',
-            73: 'Moderate Snow',
-            75: 'Heavy Snow',
-            77: 'Snow Grains',
-            80: 'Slight Rain Showers',
-            81: 'Moderate Rain Showers',
-            82: 'Violent Rain Showers',
-            85: 'Slight Snow Showers',
-            86: 'Heavy Snow Showers',
-            95: 'Thunderstorm',
-            96: 'Thunderstorm with Hail',
-            99: 'Thunderstorm with Heavy Hail'
-        };
-        return conditions[code] || 'Unknown';
+        if (!weatherCodeMap) {
+            return 'Loading...';
+        }
+        
+        const codeStr = String(code);
+        const codeData = weatherCodeMap[codeStr];
+        
+        if (!codeData) {
+            return 'Unknown';
+        }
+        
+        const timeOfDay = isDay ? 'day' : 'night';
+        return codeData[timeOfDay]?.description || 'Unknown';
     };
     
     // Format time to "HH AM/PM" format
@@ -62,69 +103,88 @@ const CurrentWeather = () => {
         return `${displayHours} ${ampm}`;
     };
     
-    // Get weather icon component based on weather code and is_day
-    // ⚠️ UNCERTAIN: Open-Meteo does NOT provide icons - this is a custom mapping
-    // The exact icon designs (moon with stars, cloud with moon, etc.) are not provided by the API
-    // Icons are created as SVG components based on weather_code and is_day values
+    // Weather Icon Component with grey-to-white recoloring
+    const WeatherIcon = ({ imageUrl, alt }) => {
+        const canvasRef = React.useRef(null);
+        const [processedImageUrl, setProcessedImageUrl] = React.useState(imageUrl);
+        
+        React.useEffect(() => {
+            if (!imageUrl) return;
+            
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const data = imageData.data;
+                
+                // Process each pixel
+                for (let i = 0; i < data.length; i += 4) {
+                    const r = data[i];
+                    const g = data[i + 1];
+                    const b = data[i + 2];
+                    const a = data[i + 3];
+                    
+                    // Check if pixel is grey (similar R, G, B values)
+                    // Grey threshold: pixels where R, G, B are similar
+                    const greyThreshold = 30;
+                    const isGrey = Math.abs(r - g) < greyThreshold && 
+                                  Math.abs(g - b) < greyThreshold && 
+                                  Math.abs(r - b) < greyThreshold;
+                    
+                    // If grey, convert to white (keep alpha)
+                    if (isGrey) {
+                        data[i] = 255;     // R -> white
+                        data[i + 1] = 255; // G -> white
+                        data[i + 2] = 255; // B -> white
+                        // Keep alpha as is
+                    }
+                }
+                
+                ctx.putImageData(imageData, 0, 0);
+                setProcessedImageUrl(canvas.toDataURL());
+            };
+            img.onerror = () => {
+                // Fallback to original image if processing fails
+                setProcessedImageUrl(imageUrl);
+            };
+            img.src = imageUrl;
+        }, [imageUrl]);
+        
+        return <img 
+            src={processedImageUrl} 
+            alt={alt || 'Weather icon'} 
+            style={{width: '100%', height: '100%', objectFit: 'contain'}} 
+        />;
+    };
+    
+    // Get weather icon image from weather_code.json
     const getWeatherIcon = (code, isDay = true) => {
-        // Simple SVG icons based on weather code
-        if (code === 0) {
-            // Clear sky
-            return isDay ? (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="50" cy="50" r="25" fill="#FFD700" stroke="#FFA500" strokeWidth="2"/>
-                </svg>
-            ) : (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M50 20 L52 35 L50 30 L48 35 Z" fill="white"/>
-                    <circle cx="50" cy="50" r="20" fill="#FFD700" opacity="0.3"/>
-                    <circle cx="30" cy="30" r="2" fill="white"/>
-                    <circle cx="70" cy="30" r="2" fill="white"/>
-                    <circle cx="40" cy="70" r="2" fill="white"/>
-                    <circle cx="60" cy="70" r="2" fill="white"/>
-                </svg>
-            );
-        } else if (code === 1) {
-            // Mainly clear / Mostly clear
-            return isDay ? (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="50" cy="50" r="25" fill="#FFD700" opacity="0.7"/>
-                    <ellipse cx="70" cy="40" rx="20" ry="15" fill="white" opacity="0.8"/>
-                </svg>
-            ) : (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M50 20 L52 35 L50 30 L48 35 Z" fill="white"/>
-                    <ellipse cx="70" cy="40" rx="20" ry="15" fill="white" opacity="0.6"/>
-                </svg>
-            );
-        } else if (code === 2) {
-            // Partly cloudy
-            return (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    {!isDay && <path d="M50 20 L52 35 L50 30 L48 35 Z" fill="white" opacity="0.5"/>}
-                    <ellipse cx="60" cy="45" rx="25" ry="18" fill="white" opacity="0.9"/>
-                    <ellipse cx="40" cy="50" rx="20" ry="15" fill="white" opacity="0.7"/>
-                </svg>
-            );
-        } else if (code === 3) {
-            // Overcast
-            return (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <ellipse cx="50" cy="50" rx="40" ry="25" fill="white" opacity="0.9"/>
-                    <ellipse cx="30" cy="45" rx="30" ry="20" fill="white" opacity="0.7"/>
-                    <ellipse cx="70" cy="55" rx="30" ry="20" fill="white" opacity="0.7"/>
-                </svg>
-            );
-        } else {
-            // Default cloud icon
-            return (
-                <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <ellipse cx="50" cy="50" rx="35" ry="22" fill="white" opacity="0.9"/>
-                    <ellipse cx="30" cy="50" rx="25" ry="18" fill="white" opacity="0.7"/>
-                    <ellipse cx="70" cy="50" rx="25" ry="18" fill="white" opacity="0.7"/>
-                </svg>
-            );
+        if (!weatherCodeMap) {
+            return <div style={{width: '100%', height: '100%', backgroundColor: '#ccc'}}></div>;
         }
+        
+        const codeStr = String(code);
+        const codeData = weatherCodeMap[codeStr];
+        
+        if (!codeData) {
+            return <div style={{width: '100%', height: '100%', backgroundColor: '#ccc'}}></div>;
+        }
+        
+        const timeOfDay = isDay ? 'day' : 'night';
+        const imageUrl = codeData[timeOfDay]?.image;
+        const alt = codeData[timeOfDay]?.description || 'Weather icon';
+        
+        if (!imageUrl) {
+            return <div style={{width: '100%', height: '100%', backgroundColor: '#ccc'}}></div>;
+        }
+        
+        return <WeatherIcon imageUrl={imageUrl} alt={alt} />;
     };
     
     // Convert wind direction degrees to compass direction
@@ -183,14 +243,19 @@ const CurrentWeather = () => {
             
             const weatherJson = await weatherResponse.json();
             
-            // Debug logging
-            console.log('Weather API Response:', weatherJson);
+            // Log all weather data fetched from API
+            console.log('=== WEATHER DATA FETCHED ===');
+            console.log('Full API Response:', JSON.stringify(weatherJson, null, 2));
+            console.log('Current Weather:', weatherJson.current);
+            console.log('Daily Forecast:', weatherJson.daily);
+            console.log('Hourly Forecast:', weatherJson.hourly);
+            console.log('Latitude:', latitude);
+            console.log('Longitude:', longitude);
+            console.log('Location Type:', locationType);
             
             const current = weatherJson.current;
             const daily = weatherJson.daily;
             const hourly = weatherJson.hourly;
-            
-            console.log('Hourly data:', hourly);
             
             // Current weather data
             const currentTemp = Math.round(current.temperature_2m);
@@ -268,6 +333,18 @@ const CurrentWeather = () => {
                 lowTemp: lowTemp,
                 hourlyForecast: hourlyForecast
             };
+            
+            // Log processed weather data
+            console.log('=== PROCESSED WEATHER DATA ===');
+            console.log('Weather Data Object:', JSON.stringify(weatherDataObj, null, 2));
+            console.log('Current Temperature:', currentTemp);
+            console.log('Weather Code:', weatherCode);
+            console.log('Is Day:', isDay);
+            console.log('High Temp:', highTemp);
+            console.log('Low Temp:', lowTemp);
+            console.log('Hourly Forecast Count:', hourlyForecast.length);
+            console.log('Hourly Forecast:', hourlyForecast);
+            console.log('==============================');
             
             // Store in cache if locationType is provided
             if (locationType) {
@@ -347,20 +424,19 @@ const CurrentWeather = () => {
                         // Store district coordinates
                         const districtCoords = { latitude, longitude };
                         
-                        // Geocode Hong Kong city to get its coordinates
-                        const hongKongCoords = await geocodeDistrict('Hong Kong', 'Hong Kong');
+                        // Use default Hong Kong coordinates
+                        const hongKongCoords = { latitude: 22.3194, longitude: 114.1714 };
                         
                         // Store coordinates for both locations
                         setCoordinates({
-                            hongKong: hongKongCoords || { latitude: 22.3194, longitude: 114.1714 }, // Fallback to HK center
+                            hongKong: hongKongCoords,
                             district: districtCoords
                         });
                         
                         setIsLoadingLocation(false);
                         
                         // Fetch weather data for Hong Kong by default
-                        const defaultCoords = hongKongCoords || { latitude: 22.3194, longitude: 114.1714 };
-                        loadWeatherData('city', defaultCoords.latitude, defaultCoords.longitude);
+                        loadWeatherData('city', hongKongCoords.latitude, hongKongCoords.longitude);
                     } catch (error) {
                         console.error('Error fetching location:', error);
                         setLocationError('Unable to determine location name');
@@ -474,14 +550,11 @@ const CurrentWeather = () => {
                 ) : null}
             </div>
             {coordinates.hongKong && coordinates.district && (
-                <div className="coordinates-display">
-                    <span className="coordinates-text">
-                        Coordinates: {selectedLocation === 'city' 
-                            ? `${coordinates.hongKong.latitude.toFixed(4)}, ${coordinates.hongKong.longitude.toFixed(4)}`
-                            : `${coordinates.district.latitude.toFixed(4)}, ${coordinates.district.longitude.toFixed(4)}`
-                        }
-                    </span>
-                </div>
+                <MapDisplay 
+                    coordinates={selectedLocation === 'city' ? coordinates.hongKong : coordinates.district}
+                    mapRef={mapRef}
+                    markerRef={markerRef}
+                />
             )}
         </div>
     );
