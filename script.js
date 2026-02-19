@@ -53,11 +53,14 @@ const CurrentWeather = () => {
     const [weatherError, setWeatherError] = React.useState(null);
     const [isLoadingWeather, setIsLoadingWeather] = React.useState(false);
     const [coordinates, setCoordinates] = React.useState({ hongKong: null, district: null });
-    const [selectedLocation, setSelectedLocation] = React.useState('city'); // 'city' or 'district'
+    const [selectedLocation, setSelectedLocation] = React.useState('district'); // 'city' or 'district'
     const [weatherCache, setWeatherCache] = React.useState({ city: null, district: null }); // Cache for weather data
     const [weatherCodeMap, setWeatherCodeMap] = React.useState(null); // Weather code mapping from JSON
+    const [meteoCoordinates, setMeteoCoordinates] = React.useState(null); // Coordinates from Open-Meteo API
     const mapRef = React.useRef(null);
     const markerRef = React.useRef(null);
+    const meteoMapRef = React.useRef(null);
+    const meteoMarkerRef = React.useRef(null);
     
     // Load weather code mapping from JSON file
     React.useEffect(() => {
@@ -100,7 +103,13 @@ const CurrentWeather = () => {
         const hours = date.getHours();
         const ampm = hours >= 12 ? 'PM' : 'AM';
         const displayHours = hours % 12 || 12;
-        return `${displayHours} ${ampm}`;
+        return `${displayHours}${ampm}`;    // no space between
+    };
+    
+    // Format date to short day name (e.g. "Fri", "Sat")
+    const formatDayName = (timeString) => {
+        const date = new Date(timeString);
+        return date.toLocaleDateString('en-US', { weekday: 'short' });
     };
     
     // Weather Icon Component with grey-to-white recoloring
@@ -232,9 +241,10 @@ const CurrentWeather = () => {
         setIsLoadingWeather(true);
         setWeatherError(null);
         try {
-            // Fetch current weather, daily forecast, and hourly forecast
+            // Fetch current weather, daily forecast (5 days), and hourly forecast
+            // Daily parameters: time, temperature_2m_max, temperature_2m_min, weather_code
             const weatherResponse = await fetch(
-                `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=2`
+                `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min,weather_code&hourly=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=6`
             );
             
             if (!weatherResponse.ok) {
@@ -242,6 +252,14 @@ const CurrentWeather = () => {
             }
             
             const weatherJson = await weatherResponse.json();
+            
+            // Extract coordinates from Open-Meteo API response
+            // Open-Meteo returns latitude and longitude in the response
+            const meteoLat = weatherJson.latitude;
+            const meteoLon = weatherJson.longitude;
+            if (meteoLat !== undefined && meteoLon !== undefined) {
+                setMeteoCoordinates({ latitude: meteoLat, longitude: meteoLon });
+            }
             
             // Log all weather data fetched from API
             console.log('=== WEATHER DATA FETCHED ===');
@@ -251,6 +269,8 @@ const CurrentWeather = () => {
             console.log('Hourly Forecast:', weatherJson.hourly);
             console.log('Latitude:', latitude);
             console.log('Longitude:', longitude);
+            console.log('Meteo Latitude:', meteoLat);
+            console.log('Meteo Longitude:', meteoLon);
             console.log('Location Type:', locationType);
             
             const current = weatherJson.current;
@@ -262,13 +282,27 @@ const CurrentWeather = () => {
             const weatherCode = current.weather_code;
             const isDay = current.is_day === 1;
             
-            // Daily high/low temperatures
+            // Daily high/low temperatures (today)
             const highTemp = daily && daily.temperature_2m_max && daily.temperature_2m_max.length > 0 
                 ? Math.round(daily.temperature_2m_max[0]) 
                 : null;
             const lowTemp = daily && daily.temperature_2m_min && daily.temperature_2m_min.length > 0 
                 ? Math.round(daily.temperature_2m_min[0]) 
                 : null;
+            
+            // 5-day daily forecast (today + next 4 days) - Open-Meteo: daily.time, daily.temperature_2m_max, daily.temperature_2m_min, daily.weather_code
+            const dailyForecast = [];
+            if (daily && daily.time && daily.temperature_2m_max && daily.temperature_2m_min && daily.weather_code) {
+                const daysToShow = Math.min(5, daily.time.length);
+                for (let i = 0; i < daysToShow; i++) {
+                    dailyForecast.push({
+                        time: daily.time[i],
+                        highTemp: Math.round(daily.temperature_2m_max[i]),
+                        lowTemp: Math.round(daily.temperature_2m_min[i]),
+                        weatherCode: daily.weather_code[i]
+                    });
+                }
+            }
             
             // Hourly forecast data (current hour + next 23 hours = 24 hours total)
             const hourlyForecast = [];
@@ -331,7 +365,8 @@ const CurrentWeather = () => {
                 isDay: isDay,
                 highTemp: highTemp,
                 lowTemp: lowTemp,
-                hourlyForecast: hourlyForecast
+                hourlyForecast: hourlyForecast,
+                dailyForecast: dailyForecast
             };
             
             // Log processed weather data
@@ -435,8 +470,8 @@ const CurrentWeather = () => {
                         
                         setIsLoadingLocation(false);
                         
-                        // Fetch weather data for Hong Kong by default
-                        loadWeatherData('city', hongKongCoords.latitude, hongKongCoords.longitude);
+                        // Fetch weather data for district by default
+                        loadWeatherData('district', districtCoords.latitude, districtCoords.longitude);
                     } catch (error) {
                         console.error('Error fetching location:', error);
                         setLocationError('Unable to determine location name');
@@ -473,17 +508,6 @@ const CurrentWeather = () => {
             {(location.city || location.district) && (
                 <div className="location-display">
                     <button 
-                        className={`location-button ${selectedLocation === 'city' ? 'selected' : ''}`}
-                        onClick={() => {
-                            if (coordinates.hongKong && selectedLocation !== 'city') {
-                                setSelectedLocation('city');
-                                loadWeatherData('city', coordinates.hongKong.latitude, coordinates.hongKong.longitude);
-                            }
-                        }}
-                    >
-                        {location.city || 'Hong Kong'}
-                    </button>
-                    <button 
                         className={`location-button ${selectedLocation === 'district' ? 'selected' : ''}`}
                         onClick={() => {
                             if (coordinates.district && selectedLocation !== 'district') {
@@ -493,6 +517,17 @@ const CurrentWeather = () => {
                         }}
                     >
                         {location.district || 'Unknown District'}
+                    </button>
+                    <button 
+                        className={`location-button ${selectedLocation === 'city' ? 'selected' : ''}`}
+                        onClick={() => {
+                            if (coordinates.hongKong && selectedLocation !== 'city') {
+                                setSelectedLocation('city');
+                                loadWeatherData('city', coordinates.hongKong.latitude, coordinates.hongKong.longitude);
+                            }
+                        }}
+                    >
+                        {location.city || 'Hong Kong'}
                     </button>
                 </div>
             )}
@@ -535,7 +570,7 @@ const CurrentWeather = () => {
                             {weatherData.hourlyForecast && weatherData.hourlyForecast.length > 0 ? (
                                 weatherData.hourlyForecast.map((hour, index) => (
                                     <div key={index} className="hourly-item">
-                                        <div className="hourly-time">{formatTime(hour.time)}</div>
+                                        <div className="hourly-time">{index === 0 ? 'Now' : formatTime(hour.time)}</div>
                                         <div className="hourly-icon">
                                             {getWeatherIcon(hour.weatherCode, hour.isDay)}
                                         </div>
@@ -546,6 +581,37 @@ const CurrentWeather = () => {
                                 <div className="hourly-loading">Loading hourly forecast...</div>
                             )}
                         </div>
+                        {weatherData.dailyForecast && weatherData.dailyForecast.length > 0 && (
+                            <>
+                                <div className="weather-separator"></div>
+                                <div className="daily-forecast">
+                                    {weatherData.dailyForecast.map((day, index) => {
+                                        const rangeMin = Math.min(...weatherData.dailyForecast.map(d => d.lowTemp));
+                                        const rangeMax = Math.max(...weatherData.dailyForecast.map(d => d.highTemp));
+                                        const range = rangeMax - rangeMin || 1;
+                                        const barStart = ((day.lowTemp - rangeMin) / range) * 100;
+                                        const barWidth = ((day.highTemp - day.lowTemp) / range) * 100;
+                                        return (
+                                            <div key={index} className="daily-forecast-row">
+                                                <div className="daily-day">{index === 0 ? 'Today' : formatDayName(day.time)}</div>
+                                                <div className="daily-icon">{getWeatherIcon(day.weatherCode, true)}</div>
+                                                <div className="daily-low">{day.lowTemp}°</div>
+                                                <div className="daily-bar-wrap">
+                                                    <div 
+                                                        className="daily-bar" 
+                                                        style={{ 
+                                                            marginLeft: `${barStart}%`, 
+                                                            width: `${Math.max(barWidth, 8)}%` 
+                                                        }} 
+                                                    />
+                                                </div>
+                                                <div className="daily-high">{day.highTemp}°</div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </>
+                        )}
                     </>
                 ) : null}
             </div>
@@ -554,6 +620,13 @@ const CurrentWeather = () => {
                     coordinates={selectedLocation === 'city' ? coordinates.hongKong : coordinates.district}
                     mapRef={mapRef}
                     markerRef={markerRef}
+                />
+            )}
+            {meteoCoordinates && (
+                <MapDisplay 
+                    coordinates={meteoCoordinates}
+                    mapRef={meteoMapRef}
+                    markerRef={meteoMarkerRef}
                 />
             )}
         </div>
