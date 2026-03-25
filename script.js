@@ -57,6 +57,7 @@ const CurrentWeather = () => {
     const [weatherCache, setWeatherCache] = React.useState({ city: null, district: null }); // Cache for weather data
     const [weatherCodeMap, setWeatherCodeMap] = React.useState(null); // Weather code mapping from JSON
     const [meteoCoordinates, setMeteoCoordinates] = React.useState(null); // Coordinates from Open-Meteo API
+    const [meteoCoordinatesCache, setMeteoCoordinatesCache] = React.useState({ city: null, district: null });
     const mapRef = React.useRef(null);
     const markerRef = React.useRef(null);
     const meteoMapRef = React.useRef(null);
@@ -258,7 +259,12 @@ const CurrentWeather = () => {
             const meteoLat = weatherJson.latitude;
             const meteoLon = weatherJson.longitude;
             if (meteoLat !== undefined && meteoLon !== undefined) {
-                setMeteoCoordinates({ latitude: meteoLat, longitude: meteoLon });
+                const meteoCoordObj = { latitude: meteoLat, longitude: meteoLon };
+                setMeteoCoordinates(meteoCoordObj);
+                setMeteoCoordinatesCache(prev => ({
+                    ...prev,
+                    [locationType]: meteoCoordObj
+                }));
             }
             
             // Log all weather data fetched from API
@@ -404,6 +410,10 @@ const CurrentWeather = () => {
         if (weatherCache[locationType]) {
             console.log(`Loading ${locationType} weather from cache`);
             setWeatherData(weatherCache[locationType]);
+            // Also restore Open-Meteo coordinates so the second map updates when switching tabs.
+            if (meteoCoordinatesCache[locationType]) {
+                setMeteoCoordinates(meteoCoordinatesCache[locationType]);
+            }
             setIsLoadingWeather(false);
             setWeatherError(null);
         } else {
