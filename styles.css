@@ -41,11 +41,11 @@ body {
 
 .location-button {
     flex: 1;
-    padding: 12px 20px;
-    font-size: 18px;
+    padding: 10px 12px;
+    font-size: 16px;
     font-weight: 600;
     color: #ffffff;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.1px;
     background-color: #1e3a8a;
     border: none;
     cursor: pointer;

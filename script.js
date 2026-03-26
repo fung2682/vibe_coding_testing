@@ -53,11 +53,11 @@ const CurrentWeather = () => {
     const [weatherError, setWeatherError] = React.useState(null);
     const [isLoadingWeather, setIsLoadingWeather] = React.useState(false);
     const [coordinates, setCoordinates] = React.useState({ hongKong: null, district: null });
-    const [selectedLocation, setSelectedLocation] = React.useState('district'); // 'city' or 'district'
-    const [weatherCache, setWeatherCache] = React.useState({ city: null, district: null }); // Cache for weather data
+    const [selectedLocation, setSelectedLocation] = React.useState('district'); // 'city' or 'district' or 'hko'
+    const [weatherCache, setWeatherCache] = React.useState({ city: null, district: null, hko: null }); // Cache for weather data
     const [weatherCodeMap, setWeatherCodeMap] = React.useState(null); // Weather code mapping from JSON
     const [meteoCoordinates, setMeteoCoordinates] = React.useState(null); // Coordinates from Open-Meteo API
-    const [meteoCoordinatesCache, setMeteoCoordinatesCache] = React.useState({ city: null, district: null });
+    const [meteoCoordinatesCache, setMeteoCoordinatesCache] = React.useState({ city: null, district: null, hko: null });
     const mapRef = React.useRef(null);
     const markerRef = React.useRef(null);
     const meteoMapRef = React.useRef(null);
@@ -80,6 +80,35 @@ const CurrentWeather = () => {
         minute: '2-digit',
         hour12: false 
     });
+
+    // HKO returns its own icon codes (e.g. 52/54) which don't always exist in our
+    // Open-Meteo/WMO `weather_code.json` mapping. When a code isn't found, we pick
+    // the nearest available mapping so icons/labels still render.
+    const resolveWeatherCode = (code) => {
+        if (!weatherCodeMap) return String(code);
+
+        const codeStr = String(code);
+        if (weatherCodeMap[codeStr]) return codeStr;
+
+        const numericKeys = Object.keys(weatherCodeMap)
+            .map(k => parseInt(k, 10))
+            .filter(n => !Number.isNaN(n))
+            .sort((a, b) => a - b);
+
+        const num = typeof code === 'number' ? code : parseInt(code, 10);
+        if (Number.isNaN(num) || numericKeys.length === 0) return codeStr;
+
+        let best = numericKeys[0];
+        let bestDist = Math.abs(numericKeys[0] - num);
+        for (const k of numericKeys) {
+            const dist = Math.abs(k - num);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = k;
+            }
+        }
+        return String(best);
+    };
     
     // Weather code to condition text mapping from weather_code.json
     const getWeatherConditionText = (code, isDay = true) => {
@@ -87,8 +116,8 @@ const CurrentWeather = () => {
             return 'Loading...';
         }
         
-        const codeStr = String(code);
-        const codeData = weatherCodeMap[codeStr];
+        const resolvedCodeStr = resolveWeatherCode(code);
+        const codeData = weatherCodeMap[resolvedCodeStr];
         
         if (!codeData) {
             return 'Unknown';
@@ -179,8 +208,8 @@ const CurrentWeather = () => {
             return <div style={{width: '100%', height: '100%', backgroundColor: '#ccc'}}></div>;
         }
         
-        const codeStr = String(code);
-        const codeData = weatherCodeMap[codeStr];
+        const resolvedCodeStr = resolveWeatherCode(code);
+        const codeData = weatherCodeMap[resolvedCodeStr];
         
         if (!codeData) {
             return <div style={{width: '100%', height: '100%', backgroundColor: '#ccc'}}></div>;
@@ -221,6 +250,122 @@ const CurrentWeather = () => {
         } catch (error) {
             console.error('Error geocoding district:', error);
             return null;
+        }
+    };
+    
+    // Fetch HKO weather data from Hong Kong Observatory Open Data
+    // - rhrread: Current Weather Report
+    // - fnd: 9-day Weather Forecast
+    // Note: HKO's datasets here do not include hourly temperatures, so we derive
+    // the 24-hour hourly strip by interpolating from the current temperature
+    // towards today's forecast high (still based on HKO values).
+    const fetchHkoWeatherData = async (latitude, longitude, locationType) => {
+        setIsLoadingWeather(true);
+        setWeatherError(null);
+
+        try {
+            const [rhrRes, fndRes] = await Promise.all([
+                fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en&format=json'),
+                fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en&format=json')
+            ]);
+
+            if (!rhrRes.ok) throw new Error('Failed to fetch HKO current weather');
+            if (!fndRes.ok) throw new Error('Failed to fetch HKO forecast');
+
+            const rhrJson = await rhrRes.json();
+            const fndJson = await fndRes.json();
+
+            const temperatureEntries = rhrJson?.temperature?.data;
+            const hkObsTempEntry =
+                (Array.isArray(temperatureEntries)
+                    ? temperatureEntries.find(e => e.place === 'Hong Kong Observatory') || temperatureEntries[0]
+                    : null);
+
+            const currentTemp = hkObsTempEntry?.value != null ? Math.round(hkObsTempEntry.value) : null;
+
+            // `icon` is returned as a list (e.g. [52]) in rhrread.
+            const hkoIconRaw = Array.isArray(rhrJson?.icon) ? rhrJson.icon[0] : rhrJson?.icon;
+
+            const rhrUpdateTime = rhrJson?.updateTime ? new Date(rhrJson.updateTime) : new Date();
+            const baseHour = rhrUpdateTime instanceof Date && !Number.isNaN(rhrUpdateTime.getTime())
+                ? rhrUpdateTime.getHours()
+                : new Date().getHours();
+            const isDay = baseHour >= 6 && baseHour < 18;
+
+            const weatherForecast = Array.isArray(fndJson?.weatherForecast) ? fndJson.weatherForecast : [];
+
+            const toForecastTime = (yyyymmdd) => {
+                const y = parseInt(String(yyyymmdd).slice(0, 4), 10);
+                const m = parseInt(String(yyyymmdd).slice(4, 6), 10);
+                const d = parseInt(String(yyyymmdd).slice(6, 8), 10);
+                // Use noon local time to avoid timezone "day shifting" issues.
+                return new Date(y, m - 1, d, 12, 0, 0).toISOString();
+            };
+
+            const dailyForecast = weatherForecast.slice(0, 5).map((day) => ({
+                time: toForecastTime(day.forecastDate),
+                highTemp: day?.forecastMaxtemp?.value != null ? Math.round(day.forecastMaxtemp.value) : null,
+                lowTemp: day?.forecastMintemp?.value != null ? Math.round(day.forecastMintemp.value) : null,
+                weatherCode: day?.ForecastIcon
+            }));
+
+            const highTemp = dailyForecast[0]?.highTemp ?? null;
+            const lowTemp = dailyForecast[0]?.lowTemp ?? null;
+
+            // Build 24-hour hourly strip by interpolating towards today's forecast high.
+            const hourlyForecast = [];
+            const now = new Date();
+            const startHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 0, 0);
+            const hoursToShow = 24;
+            const targetHigh = highTemp != null ? highTemp : (currentTemp != null ? currentTemp : 0);
+            const startTemp = currentTemp != null ? currentTemp : targetHigh;
+
+            const hourWeatherCode = dailyForecast[0]?.weatherCode ?? hkoIconRaw;
+
+            for (let i = 0; i < hoursToShow; i++) {
+                const t = new Date(startHour.getTime() + i * 60 * 60 * 1000);
+                const hourIsDay = t.getHours() >= 6 && t.getHours() < 18;
+                const tempVal = Math.round(startTemp + (targetHigh - startTemp) * (hoursToShow <= 1 ? 0 : i / (hoursToShow - 1)));
+                hourlyForecast.push({
+                    time: t.toISOString(),
+                    temperature: tempVal,
+                    weatherCode: hourWeatherCode,
+                    isDay: hourIsDay
+                });
+            }
+
+            const weatherDataObj = {
+                temperature: currentTemp,
+                // Use the forecast icon code for current-condition display.
+                // HKO `rhrread.icon` codes don't match the Open-Meteo/WMO codes in `weather_code.json`,
+                // which was causing "Heavy Snow" with correct temperatures.
+                weatherCode: hourWeatherCode,
+                isDay,
+                highTemp,
+                lowTemp,
+                hourlyForecast,
+                dailyForecast
+            };
+
+            // Ensure the second map shows something for the HKO tab.
+            const meteoCoordObj = { latitude, longitude };
+            setMeteoCoordinates(meteoCoordObj);
+            setMeteoCoordinatesCache(prev => ({
+                ...prev,
+                [locationType]: meteoCoordObj
+            }));
+
+            setWeatherCache(prev => ({
+                ...prev,
+                [locationType]: weatherDataObj
+            }));
+
+            setWeatherData(weatherDataObj);
+            setIsLoadingWeather(false);
+        } catch (error) {
+            console.error('Error fetching HKO weather:', error);
+            setWeatherError('Unable to fetch HKO weather data');
+            setIsLoadingWeather(false);
         }
     };
     
@@ -419,7 +564,11 @@ const CurrentWeather = () => {
         } else {
             // Fetch if not cached
             console.log(`Fetching ${locationType} weather data`);
-            fetchWeatherData(latitude, longitude, locationType);
+            if (locationType === 'hko') {
+                fetchHkoWeatherData(latitude, longitude, locationType);
+            } else {
+                fetchWeatherData(latitude, longitude, locationType);
+            }
         }
     };
     
@@ -539,6 +688,17 @@ const CurrentWeather = () => {
                     >
                         {location.city || 'Hong Kong'}
                     </button>
+                    <button 
+                        className={`location-button ${selectedLocation === 'hko' ? 'selected' : ''}`}
+                        onClick={() => {
+                            if (coordinates.hongKong && selectedLocation !== 'hko') {
+                                setSelectedLocation('hko');
+                                loadWeatherData('hko', coordinates.hongKong.latitude, coordinates.hongKong.longitude);
+                            }
+                        }}
+                    >
+                        HKO
+                    </button>
                 </div>
             )}
             {locationError && (
@@ -556,7 +716,12 @@ const CurrentWeather = () => {
                         <div className="weather-current">
                             <div className="weather-current-left">
                                 <div className="location-name">
-                                    {selectedLocation === 'city' ? (location.city || 'Hong Kong') : (location.district || 'Unknown District')}
+                                    {selectedLocation === 'hko'
+                                        ? 'HKO'
+                                        : (selectedLocation === 'city'
+                                            ? (location.city || 'Hong Kong')
+                                            : (location.district || 'Unknown District'))
+                                    }
                                 </div>
                                 <div className="current-temperature">{weatherData.temperature}°</div>
                             </div>
@@ -627,7 +792,7 @@ const CurrentWeather = () => {
             </div>
             {coordinates.hongKong && coordinates.district && (
                 <MapDisplay 
-                    coordinates={selectedLocation === 'city' ? coordinates.hongKong : coordinates.district}
+                    coordinates={selectedLocation === 'district' ? coordinates.district : coordinates.hongKong}
                     mapRef={mapRef}
                     markerRef={markerRef}
                 />
